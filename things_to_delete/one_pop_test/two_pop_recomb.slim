@@ -1,0 +1,90 @@
+// Two populations with different recombination maps loaded from files
+// Using recombination() callbacks for population-specific rates
+
+initialize() {
+    initializeSLiMModelType("WF");
+    defineConstant("L", 1000000);  // 1 Mb
+
+    // Load both recombination maps
+    map1_data = readCSV("recomb_map_ancestral.csv", colNames=T);
+    map2_data = readCSV("recomb_map_A2.csv", colNames=T);
+
+    // Process Map 1 (ancestral) - compute interval geometry and cumulative weights
+    ends1 = asInteger(map1_data.getValue("ends"));
+    rates1 = asFloat(map1_data.getValue("rates"));
+    starts1 = asFloat(c(0, ends1[0:(length(ends1)-2)] + 1));
+    lengths1 = asFloat(ends1) - starts1 + 1.0;
+    weights1 = rates1 * lengths1;
+
+    print(ends1);
+    print(starts1);
+
+    defineConstant("MAP1_STARTS", starts1);
+    defineConstant("MAP1_LENGTHS", lengths1);
+    defineConstant("MAP1_CUM_WEIGHTS", cumSum(weights1));
+    defineConstant("MAP1_TOTAL", sum(weights1));
+
+    // Process Map 2 (A2) - same structure
+    ends2 = asInteger(map2_data.getValue("ends"));
+    rates2 = asFloat(map2_data.getValue("rates"));
+    starts2 = asFloat(c(0, ends2[0:(length(ends2)-2)] + 1));
+    lengths2 = asFloat(ends2) - starts2 + 1.0;
+    weights2 = rates2 * lengths2;
+
+    defineConstant("MAP2_STARTS", starts2);
+    defineConstant("MAP2_LENGTHS", lengths2);
+    defineConstant("MAP2_CUM_WEIGHTS", cumSum(weights2));
+    defineConstant("MAP2_TOTAL", sum(weights2));
+
+    catn("Map 1: " + length(ends1) + " intervals, total length: " + MAP1_TOTAL);
+    catn("Map 2: " + length(ends2) + " intervals, total length: " + MAP2_TOTAL);
+
+    // Genetics setup (neutral)
+    initializeMutationType("m1", 0.5, "f", 0.0);
+    initializeGenomicElementType("g1", m1, 1.0);
+    initializeGenomicElement(g1, 0, L-1);
+    initializeMutationRate(0);
+    initializeRecombinationRate(1e-8);  // dummy, overridden by callbacks
+    initializeTreeSeq(timeUnit="generations");
+}
+
+// Generate breakpoints according to a recombination rate map
+// Returns sorted, unique breakpoint positions
+function (integer)generateBreakpoints(float cumWeights, float starts, float lengths, float total) {
+    n = rpois(1, total);
+    if (n == 0)
+        return integer(0);
+
+    positions = integer(n);
+    for (i in 0:(n-1)) {
+        // Inverse transform sampling: pick interval weighted by recomb rate
+        randomGeneticPos = runif(1) * total;
+        intervalIndex = sum(cumWeights < randomGeneticPos);
+
+        // Uniform position within chosen interval
+        positions[i] = asInteger(starts[intervalIndex] + runif(1) * lengths[intervalIndex]);
+    }
+    return sort(unique(positions));
+}
+
+// Population-specific recombination callbacks
+recombination(p0) {
+    breakpoints = generateBreakpoints(MAP1_CUM_WEIGHTS, MAP1_STARTS, MAP1_LENGTHS, MAP1_TOTAL);
+    return T;
+}
+
+recombination(p1) {
+    breakpoints = generateBreakpoints(MAP2_CUM_WEIGHTS, MAP2_STARTS, MAP2_LENGTHS, MAP2_TOTAL);
+    return T;
+}
+
+// Create populations
+1 early() {
+    sim.addSubpop("p0", 1000);
+    sim.addSubpop("p1", 1000);
+}
+
+// Output
+10000 late() {
+    sim.treeSeqOutput("two_pop_recomb.trees");
+}

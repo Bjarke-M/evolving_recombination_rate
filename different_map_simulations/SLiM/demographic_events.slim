@@ -1,0 +1,48 @@
+// === Demographic events ===
+
+1 early() {
+    sim.addSubpop("p1", N_ANC);
+}
+
+2000 early() {
+    // Split p1 into p1 + p2
+    sim.addSubpopSplit("p2", N_P2, p1);
+    p1.setSubpopulationSize(N_P1);
+}
+
+2000 late() {
+    // Introduce m3 modifier (homozygous) in p2
+    for (ind in p2.individuals) {
+        ind.haplosomes[0].addNewMutation(m3, 0.0, asInteger(L/2));
+        ind.haplosomes[1].addNewMutation(m3, 0.0, asInteger(L/2));
+    }
+}
+
+6000 early() {
+    // Create merged population p3 from p1 (50%) and p2 (50%)
+    sim.addSubpop("p3", N_ANC);
+    p3.setMigrationRates(c(p1, p2), c(0.5, 0.5));
+}
+
+6000 late() {
+    // Finalize admixture
+    p3.setMigrationRates(c(p1, p2), c(0.0, 0.0));
+    p1.setSubpopulationSize(0);
+    p2.setSubpopulationSize(0);
+
+    // Report admixture result
+    gt0 = sum(p3.individuals.countOfMutationsOfType(m3) == 0);
+    gt1 = sum(p3.individuals.countOfMutationsOfType(m3) == 1);
+    gt2 = sum(p3.individuals.countOfMutationsOfType(m3) >= 2);
+    catn("Admixture complete: gt=0:" + gt0 + ", gt=1:" + gt1 + ", gt>=2:" + gt2);
+}
+
+10000 late() {
+    // Final genotype report
+    gt0 = sum(p3.individuals.countOfMutationsOfType(m3) == 0);
+    gt1 = sum(p3.individuals.countOfMutationsOfType(m3) == 1);
+    gt2 = sum(p3.individuals.countOfMutationsOfType(m3) >= 2);
+    catn("Final genotypes: gt=0:" + gt0 + ", gt=1:" + gt1 + ", gt>=2:" + gt2);
+
+    sim.treeSeqOutput("genotype_recomb.trees");
+}

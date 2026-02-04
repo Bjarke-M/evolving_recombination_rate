@@ -1,0 +1,122 @@
+initialize() {
+    initializeTreeSeq(retainCoalescentOnly=F);
+    initializeMutationRate(0);
+    defineConstant("L", 1000000); 
+    
+    // --- MAP 1: Hotspot at 300kb ---
+    defineConstant("MAP1_STARTS",  c(0.0, 290000.0, 310000.0));
+    defineConstant("MAP1_LENGTHS", c(290000.0, 20000.0, 690000.0));
+    defineConstant("MAP1_RATES",   c(0, 1e-6, 0));
+    weights1 = MAP1_RATES * MAP1_LENGTHS;
+    defineConstant("MAP1_CUM_WEIGHTS", cumSum(weights1));
+    defineConstant("MAP1_TOTAL", sum(weights1));
+    
+    // --- MAP 2: Hotspot at 700kb ---
+    defineConstant("MAP2_STARTS",  c(0.0, 690000.0, 710000.0));
+    defineConstant("MAP2_LENGTHS", c(690000.0, 20000.0, 290000.0));
+    defineConstant("MAP2_RATES",   c(0, 1e-6, 0));
+    weights2 = MAP2_RATES * MAP2_LENGTHS;
+    defineConstant("MAP2_CUM_WEIGHTS", cumSum(weights2));
+    defineConstant("MAP2_TOTAL", sum(weights2));
+
+    // --- MAP 3: Heterozygote (Weighted Average) ---
+    // Combined boundaries: 0, 290k, 310k, 690k, 710k, 1M
+    defineConstant("MAP3_STARTS",  c(0.0, 290000.0, 310000.0, 690000.0, 710000.0));
+    defineConstant("MAP3_LENGTHS", c(290000.0, 20000.0, 380000.0, 20000.0, 290000.0));
+    // Rates are (Map1 + Map2) / 2
+    defineConstant("MAP3_RATES",   c(0, 5.05e-7, 0, 5.05e-7, 0));
+    weights3 = MAP3_RATES * MAP3_LENGTHS;
+    defineConstant("MAP3_CUM_WEIGHTS", cumSum(weights3));
+    defineConstant("MAP3_TOTAL", sum(weights3));
+    initializeMutationType("m1", 0.5, "f", 0.0); //neutral
+    initializeMutationType("m2", 0.5, "f", 0.0); // Modifier
+    m2.convertToSubstitution = F;
+
+    initializeGenomicElementType("g1", m1, 1.0);
+    initializeGenomicElement(g1, 0, L-1);
+    initializeRecombinationRate(0);
+}
+
+function (integer)generateBreakpoints(float cumWeights, float starts, float lengths, float total) {
+    n = rpois(1, total);
+    if (n == 0) return integer(0);
+    positions = integer(n);
+    for (i in 0:(n-1)) {
+        u = runif(1) * total;
+        idx = sum(cumWeights < u);
+        positions[i] = asInteger(starts[idx] + runif(1) * lengths[idx]);
+    }
+    return sort(unique(positions));
+}
+
+1 early() {
+    sim.addSubpop("p1", 10);
+    sim.setValue("didRecombine", F);
+}
+
+1 late() {
+    // Setup initial genotypes to create variation
+    for (ind in p1.individuals[0:9]) { 
+        print(ind);
+        ind.haplosomes[0].addNewMutation(m2, 0.0, asInteger(L/2));
+        ind.haplosomes[1].addNewMutation(m2, 0.0, asInteger(L/2));
+    }
+}
+
+recombination() {
+    gt = individual.countOfMutationsOfType(m2);
+    print(gt);
+    if (sim.cycle == 30) {
+        return T; ///////// WAY TO FIX THE SO SAMPLE IS NOT ALSO RECOMBINANT CHILD //////////////
+    }
+    if (gt >= 2) {
+        breakpoints = generateBreakpoints(MAP2_CUM_WEIGHTS, MAP2_STARTS, MAP2_LENGTHS, MAP2_TOTAL);
+        map_id = 2;
+    } else if (gt == 1) {
+        breakpoints = generateBreakpoints(MAP3_CUM_WEIGHTS, MAP3_STARTS, MAP3_LENGTHS, MAP3_TOTAL);
+        map_id = 3;
+    } else {
+        breakpoints = generateBreakpoints(MAP1_CUM_WEIGHTS, MAP1_STARTS, MAP1_LENGTHS, MAP1_TOTAL);
+        map_id = 1;
+    }
+
+    // Only mark as recombinant if actual breakpoints were generated
+    if (size(breakpoints) > 0) {
+        sim.setValue("didRecombine", T);
+        print(breakpoints);
+    }
+
+    return T;
+}
+
+modifyChild() {
+    // Check if either gamete resulted in a recombination event
+    if (sim.getValue("didRecombine")) {
+        // Mark the child using the 'tag' property (integer)
+        child.tag = 1; 
+    } else {
+        child.tag = 0;
+    }
+    
+    // Reset the flag for the next mating event
+    sim.setValue("didRecombine", F);
+    return T;
+}
+
+
+1: late() {
+    // Find all individuals in p1 that were marked as recombinants
+    // The tag check is very fast and avoids global ID lists
+    recombinants = p1.individuals[p1.individuals.tag == 1];
+    print(recombinants);
+    if (size(recombinants) > 0) {
+        sim.treeSeqRememberIndividuals(recombinants, permanent=F);
+        
+        // Optional: Reset tags if you want to reuse the tag property for something else later
+        // recombinants.tag = 0; 
+    }
+}
+
+30 late() { 
+    sim.treeSeqOutput("minimal_recmap_het_test.trees"); 
+}

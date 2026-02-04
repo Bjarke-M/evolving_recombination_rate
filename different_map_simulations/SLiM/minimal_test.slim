@@ -1,0 +1,65 @@
+initialize() {
+    initializeTreeSeq(retainCoalescentOnly=F);
+    initializeMutationRate(0);
+    initializeMutationType("m1", 0.5, "f", 0.0);
+    initializeGenomicElementType("g1", m1, 1.0);
+    initializeGenomicElement(g1, 0, 1e8-1);
+    initializeRecombinationRate(0);
+}
+
+1 early() {
+    sim.addSubpop("p1", 10);
+    // Initialize the flag to False. 
+    // We use this to communicate between the gamete creation and the child creation.
+    sim.setValue("didRecombine", F);
+}
+
+recombination() {
+    n1 = rpois(1, 1e-8 * 1e8);
+
+    if (n1 > 0) {
+        breakpoints = sort(unique(rdunif(n1, 0, 1e8 - 1)));
+        // Set the flag to True if *this* gamete recombined
+        sim.setValue("didRecombine", T);
+        print(breakpoints);
+    }
+    else {
+        breakpoints = integer(0);
+        // Do NOT set didRecombine to F here. 
+        // Reason: A child has 2 gametes. If the 1st recombined (T) and the 2nd didn't, 
+        // we still want the child marked as a recombinant.
+    }
+
+    return T;
+}
+
+modifyChild() {
+    // Check if either gamete resulted in a recombination event
+    if (sim.getValue("didRecombine")) {
+        // Mark the child using the 'tag' property (integer)
+        child.tag = 1; 
+    } else {
+        child.tag = 0;
+    }
+    
+    // Reset the flag for the next mating event
+    sim.setValue("didRecombine", F);
+    return T;
+}
+
+1: late() {
+    // Find all individuals in p1 that were marked as recombinants
+    // The tag check is very fast and avoids global ID lists
+    recombinants = p1.individuals[p1.individuals.tag == 1];
+    print(recombinants);
+    if (size(recombinants) > 0) {
+        sim.treeSeqRememberIndividuals(recombinants, permanent=F);
+        
+        // Optional: Reset tags if you want to reuse the tag property for something else later
+        // recombinants.tag = 0; 
+    }
+}
+
+10 late() {
+    sim.treeSeqOutput("./overlay.trees");
+}

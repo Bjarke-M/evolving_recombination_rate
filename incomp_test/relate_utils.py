@@ -5,23 +5,20 @@ from collections import defaultdict
 from tqdm import tqdm
 
 
-def flat_recombination_map(recombination_rate, sequence_length, filename):
+def hot_recombination_map(recombination_rate, filename):
     """
-    Write a flat (constant-rate) recombination map file for Relate.
+    Write a hot (constant-rate) recombination map file for Relate.
 
     :param float recombination_rate: per-base per-generation recombination rate.
-    :param float sequence_length: total sequence length in base pairs.
     :param str filename: output file path.
     """
     with open(filename, "w") as file:
         file.write("position COMBINED_rate(cM/Mb) Genetic_Map(cM)\n")
-        file.write("0 " + str(recombination_rate * 1e8) + " 0.0\n")
-        file.write(
-            str(int(sequence_length))
-            + " 0.0 "
-            + str(recombination_rate * 1e2 * sequence_length)
-            + "\n"
-        )
+        file.write("0 " + '0.0' + " 0.0\n")
+        file.write("499500 " + str(recombination_rate*1e8)  + " 0.0\n")
+        file.write("500500 " + "0.0 " + str(recombination_rate*1000*1e2) + '\n')
+        file.write("1000000 " + "0.0 " + str(recombination_rate*1000*1e2) + '\n')
+
 
 
 def run_relate(
@@ -37,7 +34,7 @@ def run_relate(
     """
     Run the Relate pipeline on a simulated msprime tree sequence.
 
-    Writes input files (VCF, ancestral FASTA, flat recombination map),
+    Writes input files (VCF, ancestral FASTA, hot recombination map),
     runs Relate, and converts the output to tree sequence format.
 
     :param tskit.TreeSequence ts: input tree sequence from msprime.
@@ -65,7 +62,7 @@ def run_relate(
         file.write("\n")
 
     rec_map_file = filename + "_rec_map.txt"
-    flat_recombination_map(recombination_rate, ts.sequence_length, rec_map_file)
+    hot_recombination_map(recombination_rate, rec_map_file)
 
     print("done", flush=True)
 
@@ -131,6 +128,17 @@ def run_relate(
     )
 
 
+def load_relate_ts(filename="relate"):
+    """
+    Load the Relate output as a tskit tree sequence.
+
+    :param str filename: the file prefix used in run_relate (no extension).
+    :return: tskit.TreeSequence inferred by Relate.
+    """
+    return tskit.load(filename + "_relate.trees")
+
+
+
 def map_mutations_to_region(ts, start_pos, end_pos, min_carriers=3):
     """
     Find all mutations whose carrier sets match a clade in the trees
@@ -169,6 +177,8 @@ def map_mutations_to_region(ts, start_pos, end_pos, min_carriers=3):
     for tree in tqdm(ts.trees(), total=ts.num_trees, desc="  Mapping to region"):
         if tree.interval[1] <= start_pos or tree.interval[0] >= end_pos:
             continue
+        # else:
+        #     print(tree.index)
         for node in tree.nodes():
             if not tree.is_sample(node):
                 clade_samples = frozenset(tree.samples(node))

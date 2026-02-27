@@ -5,210 +5,203 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 
-def count_coalescents_to_common_ancestor(ts, idx_left, idx_right, node):
-    tree_left = ts.at_index(idx_left)
-    tree_right = ts.at_index(idx_right)
+# ─── Incompatibility matrix (vectorized via dot products) ─────────────────────
 
-    # ancestery path for node in left tree
-    anc_path_left = []
-    curr = node
-    while curr != tskit.NULL:
-        anc_path_left.append(curr)
-        curr = tree_left.parent(curr)
+def compute_incompatibility_matrix_2(genotype_matrix, recsites=set()):
+    """
+    Computes the 4-gamete test incompatibility matrix using matrix dot products.
+    """
+    G = genotype_matrix.astype(np.float32)
+    G_inv = 1.0 - G
 
-    # ancestery path for node in right tree
-    anc_path_right = []
-    curr = node
-    while curr != tskit.NULL:
-        anc_path_right.append(curr)
-        curr = tree_right.parent(curr)
+    has_11 = (G @ G.T) > 0
+    has_10 = (G @ G_inv.T) > 0
+    has_01 = (G_inv @ G.T) > 0
+    has_00 = (G_inv @ G_inv.T) > 0
 
-    print(anc_path_left)
-    print(anc_path_right)
-    mrca = [x for x in anc_path_left if x in anc_path_right and x != node][0]
-    coal_c_left = anc_path_left.index(mrca) - 2
-    coal_c_right = anc_path_right.index(mrca) - 2
-    print(mrca)
-    print('coalescents left:', coal_c_left)
-    print('coalescents right:', coal_c_right)
+    incomp = has_11 & has_10 & has_01 & has_00
+    matrix = incomp.astype(np.int8)
+    np.fill_diagonal(matrix, 0)
 
-    return (coal_c_left, coal_c_right)
+    if recsites:
+        rec_list = list(recsites)
+        matrix[rec_list, :] = 0
+        matrix[:, rec_list] = 0
 
-
-def add_mutations(ts, seed=None):
-    tables = ts.dump_tables()
-    tables.mutations.clear()
-    tables.sites.clear()
-    s = 0
-    used_int_positions = set()
-    if seed:
-        np.random.seed(seed)
-    for t in ts.trees():
-        left, right = t.interval
-        coal_nodes = [n for n in t.nodes() if t.num_children(n) >= 2]
-        for node in coal_nodes:
-            pos = np.random.uniform(left, right)
-            # Skip if this integer position is already taken 
-            if int(pos) in used_int_positions:
-                continue
-            used_int_positions.add(int(pos))
-            tables.sites.add_row(position=pos, ancestral_state="A")
-            tables.mutations.add_row(site=s, node=node, derived_state="G", time=None)
-            s += 1
-
-    tables.sort()
-    return tables.tree_sequence()
-
-
-def find_recsites(ts):
-    recsites = set()
-    for s in ts.sites():
-        if len(s.mutations) > 1:
-            recsites.add(s.id)
-    return recsites
-
-
-def compute_incompatibility_matrix(ts, recsites=set()):
-    num_sites = ts.num_sites
-    genotypes = ts.genotype_matrix()
-    matrix = np.zeros((num_sites, num_sites), dtype=np.int8)
-    for i in tqdm(range(num_sites), desc="Computing incompatibility"):
-        if i not in recsites:
-            for j in range(i + 1, num_sites):
-                if j not in recsites:
-                    g1 = genotypes[i, :]
-                    g2 = genotypes[j, :]
-                    gametes = g1 | (g2 << 1)
-                    gametes = np.append(gametes, 0)
-                    if len(np.unique(gametes)) == 4:
-                        matrix[i, j] = 1
-                        matrix[j, i] = 1
     return matrix
 
 
-def compute_incompatibility_matrix_2(genotype_matrix):
-    num_sites = genotype_matrix.shape[0]
-    genotypes = genotype_matrix
-    matrix = np.zeros((num_sites, num_sites), dtype=np.int8)
-    for i in tqdm(range(num_sites), desc="Computing incompatibility"):
-            for j in range(i + 1, num_sites):
-                    g1 = genotypes[i, :]
-                    g2 = genotypes[j, :]
-                    gametes = g1 | (g2 << 1)
-                    gametes = np.append(gametes, 0)
-                    if len(np.unique(gametes)) == 4:
-                        matrix[i, j] = 1
-                        matrix[j, i] = 1
-    return matrix
-
-
-
+# ─── Pair genotype computation (vectorized) ───────────────────────────────────
 
 def incomp_pair_genotypes(incomp_genotypes, pair_matrix):
     """
     Vectorized pair genotype computation.
+
+    Parameters
+    ----------
+    incomp_genotypes : (n_nodes, n_incomp_sites) array
+    pair_matrix : (n_incomp_sites, n_incomp_sites) array
+
+    Returns
+    -------
+    results : (n_pairs, n_nodes) int8 array, values 0-3
+    pairs : (n_pairs, 2) int array
     """
-    # Find indices of the upper triangle where pairs are incompatible
     i_idx, j_idx = np.where(np.triu(pair_matrix, k=1))
-    
+
     if len(i_idx) == 0:
-        return np.empty((0, incomp_genotypes.shape[0]), dtype=int), np.empty((0, 2), dtype=int)
-    
-    # Extract all i and j columns at once, transpose to match shape (n_pairs, n_individuals)
+        return np.empty((0, incomp_genotypes.shape[0]), dtype=np.int8), np.empty((0, 2), dtype=np.intp)
+
     g_i = incomp_genotypes[:, i_idx].T
     g_j = incomp_genotypes[:, j_idx].T
-    
-    results = g_i | (g_j << 1)
+
+    results = (g_i | (g_j << 1)).astype(np.int8)
     pairs = np.column_stack((i_idx, j_idx))
-    
+
     return results, pairs
 
 
-def cross_point_genotypes(all_genotypes, pairs, point):
-    """
-    Vectorized filtering using NumPy array masking instead of list comprehensions.
-    """
-    if len(pairs) == 0:
-        return np.empty((0, all_genotypes.shape[1]), dtype=int)
-        
-    mask = (pairs[:, 0] < point) & (pairs[:, 1] >= point)
-    return all_genotypes[mask]
+# ─── Scoring functions ────────────────────────────────────────────────────────
 
-
-def score_individuals(cross_genotypes, w=1):
+def score_pairs_matrix(cross_genotypes, w=1.0):
     """
-    Vectorized scoring. Eliminates the slow row-by-row np.unique calls 
-    by counting the known discrete genotypes (0, 1, 2, 3) across the whole matrix at once.
+    Score each pair independently. Returns (n_pairs, n_nodes).
+
+    For each pair/individual:
+      +1 if genotype == 3
+      +w if individual is the sole carrier of its genotype in that pair
     """
     n_pairs, n_ind = cross_genotypes.shape
-    scores = np.zeros(n_ind, dtype=float)
-    
+    scores = np.zeros((n_pairs, n_ind), dtype=np.float32)
+
     if n_pairs == 0:
         return scores
 
-    # Base score: genotype == 3
-    scores += (cross_genotypes == 3).sum(axis=0)
+    scores[cross_genotypes == 3] += 1.0
 
-    # Unique gamete bonus
     for v in range(4):
-        is_v = (cross_genotypes == v)           # Boolean mask of where value 'v' is
-        v_counts = is_v.sum(axis=1)             # How many times 'v' appears in each pair
-        unique_v_mask = (v_counts == 1)         # Mask of pairs where 'v' only appears once
-        
-        # Add 'w' to the individuals holding the unique 'v' in those specific pairs
-        scores += (is_v & unique_v_mask[:, None]).sum(axis=0) * w
+        is_v = (cross_genotypes == v)
+        v_counts = is_v.sum(axis=1)
+        unique_v_mask = (v_counts == 1)
+        scores += (is_v & unique_v_mask[:, None]) * w
 
     return scores
 
 
-def compute_score_matrix(incomp_genotypes, sub_incomp):
-    n_nodes, n_sites = incomp_genotypes.shape
-    all_genos, pairs = incomp_pair_genotypes(incomp_genotypes, sub_incomp)
-
-    score_mat = np.zeros((n_sites - 1, n_nodes))
-    for pt in range(1, n_sites):
-        cg = cross_point_genotypes(all_genos, pairs, pt)
-        if cg.shape[0] > 0:
-            score_mat[pt - 1] = score_individuals(cg, w=1.0)
-
-    return score_mat
-
-
-def score_at_split_points(genotype_matrix, incomp_matrix, w=1):
-    incomp_sites = np.where(incomp_matrix.any(axis=1))[0]
-    n_nodes = genotype_matrix.shape[1]
-
-    if len(incomp_sites) < 2:
-        return {
-            'scores': np.empty((0, n_nodes)),
-            'incomp_sites': incomp_sites,
-        }
-
-    incomp_geno = genotype_matrix[incomp_sites, :].T
-    sub_incomp = incomp_matrix[np.ix_(incomp_sites, incomp_sites)]
-    all_genos, pairs = incomp_pair_genotypes(incomp_geno, sub_incomp)
-
-    n_incomp = len(incomp_sites)
-    score_mat = np.zeros((n_incomp - 1, n_nodes))
-
-    for pt in tqdm(range(1, n_incomp), desc="  Split points", leave=False):
-        cg = cross_point_genotypes(all_genos, pairs, pt)
-        if cg.shape[0] > 0:
-            score_mat[pt - 1] = score_individuals(cg, w=w)
-
-    return {
-        'scores': score_mat,
-        'incomp_sites': incomp_sites,
-    }
-
-
 
 def iterative_removal_scoring(genotype_matrix, incomp_matrix, site_mut_times, w=1):
+    """
+    Iteratively remove the youngest incompatible site, re-score, and collect
+    results — using INCREMENTAL UPDATES instead of full recomputation.
+
+    When a site is removed, only the pairs involving that site are affected.
+    We subtract their contribution from the diff array and recompute the
+    cumulative sum (which is cheap: O(n_incomp × n_nodes)).
+
+    The full pair scoring (the expensive part) is done only ONCE.
+    """
+    current_matrix = incomp_matrix.copy()
+    iterations = []
+
+    incomp_sites = np.where(current_matrix.any(axis=1))[0]
+    n_initial = len(incomp_sites)
+
+    if n_initial < 2:
+        return iterations
+
+    n_nodes = genotype_matrix.shape[1]
+
+    # ── One-time full computation ──
+    incomp_geno = genotype_matrix[incomp_sites, :].T
+    sub_incomp = current_matrix[np.ix_(incomp_sites, incomp_sites)]
+    all_genos, pairs = incomp_pair_genotypes(incomp_geno, sub_incomp)
+
+    if len(pairs) == 0:
+        return iterations
+
+    # Score all pairs once (the expensive step — done only once!)
+    pair_scores = score_pairs_matrix(all_genos, w=w)
+
+    n_incomp = len(incomp_sites)
+
+    # Build the initial difference array
+    diff_array = np.zeros((n_incomp, n_nodes), dtype=np.float32)
+    np.add.at(diff_array, pairs[:, 0], pair_scores)
+    np.add.at(diff_array, pairs[:, 1], -pair_scores)
+
+    # Track which pairs are still alive
+    alive = np.ones(len(pairs), dtype=bool)
+
+    # Map global site index → local index in incomp_sites
+    global_to_local = {int(s): i for i, s in enumerate(incomp_sites)}
+
+    # Track which local sites are still active (not yet removed)
+    active_locals = np.ones(n_incomp, dtype=bool)
+
+    pbar = tqdm(total=max(n_initial - 1, 0), desc="Iterative scoring")
+
+    while True:
+        active_global = incomp_sites[active_locals]
+
+        if len(active_global) < 2:
+            break
+
+        # Compute score matrix from diff array (cheap cumsum)
+        cumsum_full = np.cumsum(diff_array, axis=0)
+
+        # Extract scores at split points between consecutive active sites
+        active_local_indices = np.where(active_locals)[0]
+        score_mat = cumsum_full[active_local_indices[:-1], :]
+
+        # Identify youngest site among active
+        youngest_global = active_global[np.argmin(site_mut_times[active_global])]
+        youngest_time = site_mut_times[youngest_global]
+        youngest_local = global_to_local[int(youngest_global)]
+
+        iterations.append({
+            'incomp_sites': active_global.copy(),
+            'scores': score_mat.copy(),
+            'total': score_mat.sum(axis=0),
+            'removed_site': int(youngest_global),
+            'removed_time': float(youngest_time),
+            'n_incomp': len(active_global),
+        })
+
+        # ── Incremental update: subtract pairs involving the removed site ──
+        affected_mask = alive & (
+            (pairs[:, 0] == youngest_local) | (pairs[:, 1] == youngest_local)
+        )
+        affected_indices = np.where(affected_mask)[0]
+
+        if len(affected_indices) > 0:
+            aff_pairs = pairs[affected_indices]
+            aff_scores = pair_scores[affected_indices]
+
+            np.add.at(diff_array, aff_pairs[:, 0], -aff_scores)
+            np.add.at(diff_array, aff_pairs[:, 1], aff_scores)
+
+            alive[affected_mask] = False
+
+        active_locals[youngest_local] = False
+
+        pbar.update(1)
+
+    pbar.close()
+    return iterations
+
+
+# ─── NON-INCREMENTAL version (for correctness checking / fallback) ────────────
+
+def iterative_removal_scoring_full(genotype_matrix, incomp_matrix, site_mut_times, w=1):
+    """
+    Original full-recomputation version (with fast vectorized internals).
+    Use this for correctness validation against the incremental version.
+    """
     current_matrix = incomp_matrix.copy()
     iterations = []
 
     n_initial = np.count_nonzero(current_matrix.any(axis=1))
-    pbar = tqdm(total=max(n_initial - 1, 0), desc="Iterative scoring")
+    pbar = tqdm(total=max(n_initial - 1, 0), desc="Iterative scoring (full)")
 
     while True:
         incomp_sites = np.where(current_matrix.any(axis=1))[0]
@@ -219,7 +212,6 @@ def iterative_removal_scoring(genotype_matrix, incomp_matrix, site_mut_times, w=
         youngest_site = incomp_sites[np.argmin(site_mut_times[incomp_sites])]
         youngest_time = site_mut_times[youngest_site]
 
-        # The huge speedup will be felt here
         result = score_at_split_points(genotype_matrix, current_matrix, w=w)
 
         iterations.append({
@@ -231,7 +223,6 @@ def iterative_removal_scoring(genotype_matrix, incomp_matrix, site_mut_times, w=
             'n_incomp': len(incomp_sites),
         })
 
-        # Zero out removed site
         current_matrix[youngest_site, :] = 0
         current_matrix[:, youngest_site] = 0
         pbar.update(1)
@@ -240,7 +231,7 @@ def iterative_removal_scoring(genotype_matrix, incomp_matrix, site_mut_times, w=
     return iterations
 
 
-# --- Recombination event summary functions ---
+# ─── Recombination event summary functions (unchanged) ────────────────────────
 
 def find_recombination_events(ts):
     events = []
@@ -263,12 +254,12 @@ def find_recombination_events(ts):
 
         if edges_left and edges_right:
             child = edges_left[0].child
-            breakpoint = min(e.right for e in edges_left)
+            breakpoint_ = min(e.right for e in edges_left)
             events.append({
                 'rec_node_left': node_id,
                 'rec_node_right': partner,
                 'child': child,
-                'breakpoint': breakpoint,
+                'breakpoint': breakpoint_,
                 'time': node.time,
             })
 
@@ -279,7 +270,6 @@ def get_descendant_samples(ts, rec_events):
     for event in rec_events:
         tree = ts.at(event['breakpoint'] - 1)
         event['descendant_samples'] = sorted(tree.samples(event['child']))
-        # All descendant nodes (samples + internal), excluding RE nodes
         event['descendant_nodes'] = sorted(
             n for n in tree.nodes(event['child'])
             if n != event['child'] and ts.node(n).flags != msprime.NODE_IS_RE_EVENT
@@ -367,8 +357,7 @@ def recombination_summary(ts):
 
 def get_incomp_site_position(mts, incomp_matrix, rec_df):
     """For each recombination event, find between which pair of incompatible
-    sites the breakpoint falls.
-    """
+    sites the breakpoint falls."""
     incompatible_sites = np.where(incomp_matrix.any(axis=1))[0]
     incomp_positions = np.array([mts.site(int(s)).position for s in incompatible_sites])
 
